@@ -31,6 +31,7 @@ import org.lineageos.updater.model.UpdateInfo;
 import org.lineageos.updater.model.UpdateStatus;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -52,6 +53,7 @@ public class UpdaterController implements Controller {
 
     private static final int MAX_REPORT_INTERVAL_MS = 1000;
 
+    private final Context mContext;
     private final LocalBroadcastManager mBroadcastManager;
     private final UpdatesDbHelper mUpdatesDbHelper;
 
@@ -80,6 +82,7 @@ public class UpdaterController implements Controller {
         PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         mWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Updater");
         mWakeLock.setReferenceCounted(false);
+        mContext = context.getApplicationContext();
 
         Utils.cleanupDownloadsDir(context);
 
@@ -365,12 +368,21 @@ public class UpdaterController implements Controller {
             Log.d(TAG, "Changing name with " + destination.getName());
         }
         update.setFile(destination);
-        DownloadClient downloadClient = new DownloadClient.Builder()
-                .setUrl(update.getDownloadUrl())
-                .setDestination(update.getFile())
-                .setDownloadCallback(getDownloadCallback(downloadId))
-                .setProgressListener(getProgressListener(downloadId))
-                .build();
+        DownloadClient downloadClient;
+        try {
+            downloadClient = new DownloadClient.Builder()
+                    .setUrl(update.getDownloadUrl())
+                    .setDestination(update.getFile())
+                    .setDownloadCallback(getDownloadCallback(downloadId))
+                    .setProgressListener(getProgressListener(downloadId))
+                    .setUseDuplicateLinks(true)
+                    .build();
+        } catch (IOException exception) {
+            Log.e(TAG, "Could not build download client");
+            update.setStatus(UpdateStatus.PAUSED_ERROR);
+            notifyUpdateChange(downloadId);
+            return false;
+        }
         addDownloadClient(mDownloads.get(downloadId), downloadClient);
         update.setStatus(UpdateStatus.STARTING);
         notifyUpdateChange(downloadId);
@@ -399,12 +411,21 @@ public class UpdaterController implements Controller {
             verifyUpdateAsync(downloadId);
             notifyUpdateChange(downloadId);
         } else {
-            DownloadClient downloadClient = new DownloadClient.Builder()
-                    .setUrl(update.getDownloadUrl())
-                    .setDestination(update.getFile())
-                    .setDownloadCallback(getDownloadCallback(downloadId))
-                    .setProgressListener(getProgressListener(downloadId))
-                    .build();
+            DownloadClient downloadClient;
+            try {
+                downloadClient = new DownloadClient.Builder()
+                        .setUrl(update.getDownloadUrl())
+                        .setDestination(update.getFile())
+                        .setDownloadCallback(getDownloadCallback(downloadId))
+                        .setProgressListener(getProgressListener(downloadId))
+                        .setUseDuplicateLinks(true)
+                        .build();
+            } catch (IOException exception) {
+                Log.e(TAG, "Could not build download client");
+                update.setStatus(UpdateStatus.PAUSED_ERROR);
+                notifyUpdateChange(downloadId);
+                return false;
+            }
             addDownloadClient(mDownloads.get(downloadId), downloadClient);
             update.setStatus(UpdateStatus.STARTING);
             notifyUpdateChange(downloadId);
@@ -515,11 +536,18 @@ public class UpdaterController implements Controller {
 
     @Override
     public boolean isInstallingUpdate() {
-        return ABUpdateInstaller.isInstallingUpdate();
+        return UpdateInstaller.isInstalling() ||
+                ABUpdateInstaller.isInstallingUpdate(mContext);
     }
 
     @Override
     public boolean isInstallingUpdate(String downloadId) {
-        return ABUpdateInstaller.isInstallingUpdate(downloadId);
+        return UpdateInstaller.isInstalling(downloadId) ||
+                ABUpdateInstaller.isInstallingUpdate(mContext, downloadId);
+    }
+
+    @Override
+    public boolean isInstallingABUpdate() {
+        return ABUpdateInstaller.isInstallingUpdate(mContext);
     }
 }

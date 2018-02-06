@@ -16,6 +16,7 @@
 package org.lineageos.updater;
 
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.preference.PreferenceManager;
 import android.support.design.widget.Snackbar;
@@ -40,9 +41,9 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import org.lineageos.updater.controller.Controller;
+import org.lineageos.updater.controller.UpdaterService;
 import org.lineageos.updater.misc.BuildInfoUtils;
 import org.lineageos.updater.misc.Constants;
-import org.lineageos.updater.misc.FileUtils;
 import org.lineageos.updater.misc.PermissionsUtils;
 import org.lineageos.updater.misc.StringGenerator;
 import org.lineageos.updater.misc.Utils;
@@ -73,6 +74,8 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
         RESUME,
         INSTALL,
         INFO,
+        DELETE,
+        CANCEL_INSTALLATION,
     }
 
     public static class ViewHolder extends RecyclerView.ViewHolder {
@@ -156,9 +159,16 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
                     update.getProgress() / 100.f);
             viewHolder.mProgressPercentage.setText(percentage);
         } else if (mUpdaterController.isInstallingUpdate(downloadId)) {
-            setButtonAction(viewHolder.mAction, Action.INSTALL, downloadId, false);
-            viewHolder.mProgressText.setText(R.string.list_installing_update);
-            viewHolder.mProgressBar.setIndeterminate(true);
+            setButtonAction(viewHolder.mAction, Action.CANCEL_INSTALLATION, downloadId, true);
+            boolean notAB = !mUpdaterController.isInstallingABUpdate();
+            viewHolder.mProgressText.setText(notAB ? R.string.dialog_prepare_zip_message :
+                    update.getFinalizing() ?
+                            R.string.finalizing_package :
+                            R.string.preparing_ota_first_boot);
+            viewHolder.mProgressBar.setProgress(update.getInstallProgress());
+            String percentage = NumberFormat.getPercentInstance().format(
+                    update.getInstallProgress() / 100.f);
+            viewHolder.mProgressPercentage.setText(percentage);
         } else if (mUpdaterController.isVerifyingUpdate(downloadId)) {
             setButtonAction(viewHolder.mAction, Action.INSTALL, downloadId, false);
             viewHolder.mProgressText.setText(R.string.list_verifying_update);
@@ -189,7 +199,9 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
 
         if (update.getPersistentStatus() == UpdateStatus.Persistent.VERIFIED) {
             viewHolder.itemView.setOnLongClickListener(getLongClickListener(update, true));
-            setButtonAction(viewHolder.mAction, Action.INSTALL, update.getDownloadId(), !isBusy());
+            setButtonAction(viewHolder.mAction,
+                    Utils.canInstall(update) ? Action.INSTALL : Action.DELETE,
+                    update.getDownloadId(), !isBusy());
         } else if (!Utils.canInstall(update)) {
             viewHolder.itemView.setOnLongClickListener(getLongClickListener(update, false));
             setButtonAction(viewHolder.mAction, Action.INFO, update.getDownloadId(), !isBusy());
@@ -223,7 +235,7 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
                 activeLayout = update.getStatus() == UpdateStatus.STARTING;
                 break;
             case UpdateStatus.Persistent.VERIFIED:
-                activeLayout = false;
+                activeLayout = update.getStatus() == UpdateStatus.INSTALLING;
                 break;
             case UpdateStatus.Persistent.INCOMPLETE:
                 activeLayout = true;
@@ -377,6 +389,32 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
                 };
             }
             break;
+            case DELETE: {
+                button.setImageResource(R.drawable.ic_delete_black);
+                button.setContentDescription(
+                        mActivity.getString(R.string.action_description_delete));
+                button.setEnabled(enabled);
+                clickListener = !enabled ? null : new View.OnClickListener() {
+                    @Override
+                    public void onClick(View view) {
+                        getDeleteDialog(downloadId).show();
+                    }
+                };
+            }
+            break;
+            case CANCEL_INSTALLATION: {
+                button.setImageResource(R.drawable.ic_cancel);
+                button.setContentDescription(
+                        mActivity.getString(R.string.action_description_cancel));
+                button.setEnabled(enabled);
+                clickListener = !enabled ? null : new View.OnClickListener() {
+                    @Override
+                    public void onClick(View view) {
+                        getCancelInstallationDialog().show();
+                    }
+                };
+            }
+            break;
             default:
                 clickListener = null;
         }
@@ -454,6 +492,21 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
                             @Override
                             public void onClick(DialogInterface dialog, int which) {
                                 Utils.triggerUpdate(mActivity, downloadId);
+                            }
+                        })
+                .setNegativeButton(android.R.string.cancel, null);
+    }
+
+    private AlertDialog.Builder getCancelInstallationDialog() {
+        return new AlertDialog.Builder(mActivity)
+                .setMessage(R.string.cancel_installation_dialog_message)
+                .setPositiveButton(android.R.string.ok,
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                Intent intent = new Intent(mActivity, UpdaterService.class);
+                                intent.setAction(UpdaterService.ACTION_INSTALL_STOP);
+                                mActivity.startService(intent);
                             }
                         })
                 .setNegativeButton(android.R.string.cancel, null);
@@ -547,17 +600,15 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
     }
 
     private void exportUpdate(UpdateInfo update) {
-        try {
-            File dest = new File(Utils.getExportPath(mActivity), update.getName());
-            if (dest.exists()) {
-                dest = Utils.appendSequentialNumber(dest);
-            }
-            FileUtils.copyFileWithDialog(mActivity, update.getFile(), dest);
-        } catch (IOException e) {
-            Log.e(TAG, "Export failed", e);
-            mActivity.showSnackbar(R.string.snack_export_failed,
-                    Snackbar.LENGTH_LONG);
+        File dest = new File(Utils.getExportPath(mActivity), update.getName());
+        if (dest.exists()) {
+            dest = Utils.appendSequentialNumber(dest);
         }
+        Intent intent = new Intent(mActivity, ExportUpdateService.class);
+        intent.setAction(ExportUpdateService.ACTION_START_EXPORTING);
+        intent.putExtra(ExportUpdateService.EXTRA_SOURCE_FILE, update.getFile());
+        intent.putExtra(ExportUpdateService.EXTRA_DEST_FILE, dest);
+        mActivity.startService(intent);
         stopActionMode();
     }
 
